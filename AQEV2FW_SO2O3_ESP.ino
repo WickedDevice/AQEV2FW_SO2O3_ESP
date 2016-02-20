@@ -261,6 +261,7 @@ void sampling_command(char * arg);
 void altitude_command(char * arg);
 void set_ntp_server(char * arg);
 void set_ntp_timezone_offset(char * arg);
+void set_update_server_name(char * arg);
 
 // Note to self:
 //   When implementing a new parameter, ask yourself:

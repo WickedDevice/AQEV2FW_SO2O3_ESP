@@ -79,6 +79,11 @@ float relative_humidity_percent = 0.0f;
 float so2_ppb = 0.0f;
 float o3_ppb = 0.0f;
 
+float instant_temperature_degc = 0.0f;
+float instant_humidity_percent = 0.0f;
+float instant_so2_v = 0.0f;
+float instant_o3_v = 0.0f;
+
 float gps_latitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float gps_longitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float gps_altitude = TinyGPS::GPS_INVALID_F_ALTITUDE;
@@ -116,6 +121,14 @@ boolean init_spi_flash_ok = false;
 boolean init_esp8266_ok = false;
 boolean init_sdcard_ok = false;
 boolean init_rtc_ok = false;
+
+typedef struct{
+  float temperature_degC;     // starting at this temperature 
+  float slope_volts_per_degC; // use a line with this slope
+  float intercept_volts;      // and this intercept
+                              // to calculate the baseline voltage
+} baseline_voltage_t;
+baseline_voltage_t baseline_voltage_struct; // scratch space for a single baseline_voltage_t entry
 
 #define BACKLIGHT_OFF_AT_STARTUP (0)
 #define BACKLIGHT_ON_AT_STARTUP  (1)
@@ -178,6 +191,8 @@ uint8_t mode = MODE_OPERATIONAL;
 #define EEPROM_USE_NTP            (EEPROM_MQTT_TOPIC_PREFIX - 1)  // 1 means use NTP, anything else means don't use NTP
 #define EEPROM_NTP_SERVER_NAME    (EEPROM_USE_NTP - 32)           // 32-bytes for the NTP server to use
 #define EEPROM_NTP_TZ_OFFSET_HRS  (EEPROM_NTP_SERVER_NAME - 4)    // timezone offset as a floating point value
+#define EEPROM_SO2_BASELINE_VOLTAGE_TABLE (EEPROM_NTP_TZ_OFFSET_HRS - 4) // array of (up to) six structures for baseline offset characterization over temperature
+#define EEPROM_O3_BASELINE_VOLTAGE_TABLE (EEPROM_SO2_BASELINE_VOLTAGE_TABLE - (5*sizeof(baseline_voltage_t))) // array of (up to) five structures for baseline offset characterization over temperature
 //  /\
 //   L Add values up here by subtracting offsets to previously added values
 //   * ... and make sure the addresses don't collide and start overlapping!
@@ -262,6 +277,8 @@ void altitude_command(char * arg);
 void set_ntp_server(char * arg);
 void set_ntp_timezone_offset(char * arg);
 void set_update_server_name(char * arg);
+void so2_baseline_voltage_characterization_command(char * arg);
+void o3_baseline_voltage_characterization_command(char * arg);
 
 // Note to self:
 //   When implementing a new parameter, ask yourself:
@@ -281,6 +298,7 @@ void set_update_server_name(char * arg);
 // these keywords are padded with spaces
 // in order to ease printing as a table
 // string comparisons should use strncmp rather than strcmp
+// TODO: put this in FLASH and access it through *_P commands
 char * commands[] = {
   "get        ",
   "init       ",
@@ -323,6 +341,8 @@ char * commands[] = {
   "altitude   ",
   "ntpsrv     ",
   "tz_off     ",
+  "so2_blv    ",  
+  "o3_blv    ",  
   0
 };
 
@@ -368,6 +388,8 @@ void (*command_functions[])(char * arg) = {
   altitude_command,
   set_ntp_server,
   set_ntp_timezone_offset,
+  so2_baseline_voltage_characterization_command,
+  o3_baseline_voltage_characterization_command,
   0
 };
 
@@ -408,6 +430,8 @@ uint8_t esp8266_input_buffer[ESP8266_INPUT_BUFFER_SIZE] = {0};     // sketch mus
 char converted_value_string[64] = {0};
 char compensated_value_string[64] = {0};
 char raw_value_string[64] = {0};
+char raw_instant_value_string[64] = {0};
+
 char MQTT_TOPIC_STRING[128] = {0};
 char MQTT_TOPIC_PREFIX[64] = "/orgs/wd/aqe/";
 
@@ -1438,6 +1462,8 @@ void help_menu(char * arg) {
       get_help_indent(); Serial.println(F("altitude - the altitude of the sensor in meters above sea level"));
       get_help_indent(); Serial.println(F("ntpsrv - the NTP server name"));
       get_help_indent(); Serial.println(F("tz_off - the timezone offset for use with NTP in decimal hours"));      
+      get_help_indent(); Serial.println(F("so2_blv - the so2 baseline voltage characterization"));
+      get_help_indent(); Serial.println(F("o3_blv - the o3 baseline voltage characterization"));
       get_help_indent(); Serial.println(F("result: the current, human-readable, value of <param>"));
       get_help_indent(); Serial.println(F("        is printed to the console."));
     }
@@ -1488,7 +1514,7 @@ void help_menu(char * arg) {
       get_help_indent(); Serial.println(F("updatefile - restores the Update filename"));           
       get_help_indent(); Serial.println(F("key        - restores the Private Key from BACKUP "));
       get_help_indent(); Serial.println(F("so2        - restores the SO2 calibration parameters from BACKUP "));
-      get_help_indent(); Serial.println(F("co         - restores the O3 calibration parameters from BACKUP "));
+      get_help_indent(); Serial.println(F("o3         - restores the O3 calibration parameters from BACKUP "));
       get_help_indent(); Serial.println(F("temp_off   - restores the Temperature reporting offset from BACKUP "));
       get_help_indent(); Serial.println(F("hum_off    - restores the Humidity reporting offset from BACKUP "));         
     }
@@ -1532,7 +1558,7 @@ void help_menu(char * arg) {
       get_help_indent(); Serial.println(F("<param2> netmask, e.g. 255.255.255.0"));      
       get_help_indent(); Serial.println(F("<param3> default gateway ip address, e.g. 192.168.1.1"));      
       get_help_indent(); Serial.println(F("<param4> dns server ip address, e.g. 8.8.8.8"));      
-      get_help_indent(); Serial.println(F("result: The entered static network parameters will be used by the CC3000"));
+      get_help_indent(); Serial.println(F("result: The entered static network parameters will be used by the ESP8266"));
       get_help_indent(); Serial.println(F("note:   To configure DHCP use command 'use dhcp'"));
       warn_could_break_connect();      
     }
@@ -1645,8 +1671,8 @@ void help_menu(char * arg) {
       get_help_indent(); Serial.println(F("mqttpwd  - backs up the MQTT password"));
       get_help_indent(); Serial.println(F("mac      - backs up the ESP8266 MAC address"));
       get_help_indent(); Serial.println(F("key      - backs up the 256-bit private key"));
-      get_help_indent(); Serial.println(F("no2      - backs up the NO2 calibration parameters"));
-      get_help_indent(); Serial.println(F("co       - backs up the CO calibration parameters"));
+      get_help_indent(); Serial.println(F("so2      - backs up the SO2 calibration parameters"));
+      get_help_indent(); Serial.println(F("o3       - backs up the O3 calibration parameters"));
       get_help_indent(); Serial.println(F("temp     - backs up the Temperature calibration parameters"));
       get_help_indent(); Serial.println(F("hum      - backs up the Humidity calibration parameters"));  
       get_help_indent(); Serial.println(F("tz       - backs up the Timezone offset for NTP"));    
@@ -1716,6 +1742,25 @@ void help_menu(char * arg) {
     else if(strncmp("tz_off", arg, 6) == 0){
       Serial.println(F("tz_off <number>"));
       get_help_indent(); Serial.println(F("<number> is the decimal value of the timezone offset in hours from GMT"));
+    }
+    else if (strncmp("so2_blv", arg, 7) == 0) {
+      Serial.println(F("so2_blv <sub-command>"));
+      get_help_indent(); Serial.println(F("<sub-command> is one of 'add', 'clear', 'show'"));
+      get_help_indent(); Serial.println(F("so2_blv add [temperature] [slope] [intercept]"));
+      get_help_indent(); Serial.println(F("    adds a row to the characterization table"));
+      get_help_indent(); Serial.println(F("so2_blv show"));
+      get_help_indent(); Serial.println(F("    displays the current characterization table"));
+      get_help_indent(); Serial.println(F("so2_blv clear"));
+      get_help_indent(); Serial.println(F("    erases the contents of the characterization table"));
+    }
+    else if (strncmp("o3_blv", arg, 6) == 0) {
+      get_help_indent(); Serial.println(F("<sub-command> is one of 'add', 'clear', 'show'"));
+      get_help_indent(); Serial.println(F("o3_blv add [temperature] [slope] [intercept]"));
+      get_help_indent(); Serial.println(F("    adds a row to the characterization table"));
+      get_help_indent(); Serial.println(F("o3_blv show"));
+      get_help_indent(); Serial.println(F("    displays the current characterization table"));
+      get_help_indent(); Serial.println(F("o3_blv clear"));
+      get_help_indent(); Serial.println(F("    erases the contents of the characterization table"));
     }
     else if (strncmp("backlight", arg, 9) == 0){
       Serial.println(F("backlight <config>"));
@@ -2208,6 +2253,8 @@ void print_eeprom_value(char * arg) {
     print_eeprom_float((const float *) EEPROM_SO2_CAL_SLOPE);
     print_label_with_star_if_not_backed_up("SO2 Offset [V]: ", BACKUP_STATUS_SO2_CALIBRATION_BIT);
     print_eeprom_float((const float *) EEPROM_SO2_CAL_OFFSET);
+    Serial.print(F("    ")); Serial.println(F("SO2 Baseline Voltage Characterization:"));
+    print_baseline_voltage_characterization(EEPROM_SO2_BASELINE_VOLTAGE_TABLE);
 
     print_label_with_star_if_not_backed_up("O3 Sensitivity [nA/ppm]: ", BACKUP_STATUS_O3_CALIBRATION_BIT);
     print_eeprom_float((const float *) EEPROM_O3_SENSITIVITY);
@@ -2215,6 +2262,8 @@ void print_eeprom_value(char * arg) {
     print_eeprom_float((const float *) EEPROM_O3_CAL_SLOPE);
     print_label_with_star_if_not_backed_up("O3 Offset [V]: ", BACKUP_STATUS_O3_CALIBRATION_BIT);
     print_eeprom_float((const float *) EEPROM_O3_CAL_OFFSET);
+    Serial.print(F("    ")); Serial.println(F("O3 Baseline Voltage Characterization:"));
+    print_baseline_voltage_characterization(EEPROM_O3_BASELINE_VOLTAGE_TABLE);
     
     char temp_reporting_offset_label[64] = {0};
     char temperature_units = (char) eeprom_read_byte((uint8_t *) EEPROM_TEMPERATURE_UNITS);
@@ -3814,6 +3863,287 @@ void selectSlot3(void){
   selectNoSlot();
   digitalWrite(7, HIGH); 
 }
+
+boolean add_baseline_voltage_characterization(char * arg, uint32_t eeprom_table_base_address){
+  // there should be three values provided
+  // a temperature in degC        [float]  
+  // a slope in Volts / degC      [float]
+  // an intercept in Volts        [float]
+  // tokenization should already be in progress when this function is called
+  
+  char * token = strtok(NULL, " "); // advance to the next token  
+  if(token == NULL){
+    Serial.println(F("Error: No temperature provided"));
+    return false;  
+  }
+    
+  if (!convertStringToFloat(token, &(baseline_voltage_struct.temperature_degC))) {
+    Serial.print(F("Error: Failed to convert temperature string \""));
+    Serial.print(token);
+    Serial.println(F("\" to decimal number."));
+    return false;
+  }
+
+  token = strtok(NULL, " "); // advance to the next token  
+  if(token == NULL){
+    Serial.println(F("Error: No slope provided"));
+    return false;  
+  }
+  
+  if (!convertStringToFloat(token, &(baseline_voltage_struct.slope_volts_per_degC))) {
+    Serial.print(F("Error: Failed to convert slope string \""));
+    Serial.print(token);
+    Serial.println(F("\" to decimal number."));
+    return false;
+  }
+
+
+  token = strtok(NULL, " "); // advance to the next token  
+  if(token == NULL){
+    Serial.println(F("Error: No intercpet provided"));
+    return false;  
+  }  
+  
+  if (!convertStringToFloat(token, &(baseline_voltage_struct.intercept_volts))) {
+    Serial.print(F("Error: Failed to convert intercept string \""));
+    Serial.print(token);
+    Serial.println(F("\" to decimal number."));
+    return false;
+  }  
+
+  // if you got this far, you've managed to parse three numbers and save them to the temp struct
+  // and we should commit the results to EEPROM, and we should do so at the first available
+  // index where the temperature is currently NaN, if there are no such spaces then report an 
+  // error instructing the user to clear the table because it's full
+  baseline_voltage_t tmp;
+
+  // keep track of the highest temperature we've seen until we find an empty slot
+  // and enforce the constraint that the temperature's in the table are monotonically increasing
+  // any large negative number would do to initialize, but this is as cold as it gets, because Physics
+  float temperature_of_first_valid_entry_degC = -273.15; 
+  boolean empty_location_found = false;
+  for(uint8_t ii = 0; ii < 5; ii++){
+    eeprom_read_block((void *) &tmp, (void *) (eeprom_table_base_address + (ii*sizeof(baseline_voltage_t))), sizeof(baseline_voltage_t));
+    if(!valid_temperature_characterization_struct(&tmp)){
+      // ok we've found a slot where our new entry might be able to go, but first we have to enforce the monotinicity constraint
+      // so that the search process is easier later
+      if(temperature_of_first_valid_entry_degC >= baseline_voltage_struct.temperature_degC){
+        // monotonicity contraint violation
+        Serial.println(F("Error: Entries must be added in increasing order of temperature"));
+        return false;
+      }
+      empty_location_found = true;
+      // write the newly parsed struct at this index
+      eeprom_write_block((void *) &baseline_voltage_struct, (void *) (eeprom_table_base_address + (ii*sizeof(baseline_voltage_t))), sizeof(baseline_voltage_t));
+      break;
+    }
+    else{
+      temperature_of_first_valid_entry_degC = tmp.temperature_degC;
+    }
+  }
+
+  if(!empty_location_found){
+    Serial.print(F("Error: Table is full, please run '"));             
+    if(eeprom_table_base_address == EEPROM_O3_BASELINE_VOLTAGE_TABLE){
+      Serial.print(F("o3"));
+    }
+    else{
+      Serial.print(F("so2"));
+    }
+    Serial.print(F("_blv clear' first"));
+    Serial.println();
+    return false;
+  }
+
+  return true;
+  
+}
+
+boolean clear_baseline_voltage_characterization(uint32_t eeprom_table_base_address){
+  baseline_voltage_t tmp;
+  uint32_t erase_float = 0xFFFFFFFF;
+  boolean deleted_at_least_one_entry = false;
+  for(uint8_t ii = 0; ii < 5; ii++){
+    eeprom_read_block((void *) &tmp, (void *) (eeprom_table_base_address + (ii*sizeof(baseline_voltage_t))), sizeof(baseline_voltage_t));
+    if(!isnan(tmp.temperature_degC)){
+      deleted_at_least_one_entry = true;
+      tmp.temperature_degC = *((float *) (&erase_float));
+      tmp.slope_volts_per_degC = *((float *) (&erase_float));
+      tmp.intercept_volts = *((float *) (&erase_float));     
+      eeprom_write_block((const void *) &tmp, (void *) (eeprom_table_base_address + (ii*sizeof(baseline_voltage_t))), sizeof(baseline_voltage_t));
+    }
+  }
+
+  if(deleted_at_least_one_entry){
+    return true;
+  }
+  return false;
+}
+
+void baseline_voltage_characterization_command(char * arg, uint32_t eeprom_table_base_address){
+  boolean valid = true;  
+  
+  if(!configMemoryUnlocked(__LINE__)){
+    return;
+  }
+
+  trim_string(arg);
+  lowercase(arg);
+
+  // make sure there's at least one argument
+  char * token = strtok(arg, " "); // tokenize the string on spaces
+  if(token == NULL){
+    Serial.println(F("Error: no arguments provided"));
+    return;  
+  }
+
+  // the first argument should be either "add", "show", or "clear"
+  if(strcmp(token, "add") == 0){
+    valid = add_baseline_voltage_characterization(token, eeprom_table_base_address); // tokenization in progress!
+  }
+  else if(strcmp(token, "clear") == 0){
+    valid = clear_baseline_voltage_characterization(eeprom_table_base_address);
+  }
+  else if(strcmp(token, "show") == 0){
+    valid = false;
+    print_baseline_voltage_characterization(eeprom_table_base_address);
+  }
+  else{
+    Serial.print(F("Error: valid sub-commands are [add, clear] but got '"));
+    Serial.print(token);
+    Serial.println("'");
+    return;
+  }
+  
+  if (valid) {
+    recomputeAndStoreConfigChecksum();
+  }    
+}
+
+void o3_baseline_voltage_characterization_command(char * arg){
+  baseline_voltage_characterization_command(arg, EEPROM_O3_BASELINE_VOLTAGE_TABLE);
+}
+
+void so2_baseline_voltage_characterization_command(char * arg){
+  baseline_voltage_characterization_command(arg, EEPROM_SO2_BASELINE_VOLTAGE_TABLE);
+}
+
+void load_temperature_characterization_entry(uint32_t eeprom_table_base_address, uint8_t index){
+  eeprom_read_block((void *) &baseline_voltage_struct, (void *) (eeprom_table_base_address + (index*sizeof(baseline_voltage_t))), sizeof(baseline_voltage_t));  
+}
+
+boolean load_and_validate_temperature_characterization_entry(uint32_t eeprom_table_base_address, uint8_t index){
+  return valid_temperature_characterization_entry(eeprom_table_base_address, index);
+}
+
+boolean find_and_load_temperature_characterization_entry(uint32_t eeprom_table_base_address, float target_temperature_degC){  
+  // this search requires that table entries are monotonically increasing in temperature
+  // which is to say entry[0].temperature_degC < entry[1].temperature_degC < ... < entry[4].temperature_degC
+  // this is enforced by the add entry mechanism
+
+  // finds the first entry that has a temperature that is <= target_temperature
+  // as a side-effect, if such an entry is found, it is loaded into baseline_voltage_struct
+  
+  int8_t index_of_highest_temperature_that_is_less_than_or_equal_to_target_temperature = -1;
+  for(uint8_t ii = 0; ii < 5; ii++){
+    if(load_and_validate_temperature_characterization_entry(eeprom_table_base_address, ii)){
+      if(baseline_voltage_struct.temperature_degC <= target_temperature_degC){
+        index_of_highest_temperature_that_is_less_than_or_equal_to_target_temperature = ii;
+      }
+      else{
+        break;
+      }
+    }    
+  }
+
+  if(index_of_highest_temperature_that_is_less_than_or_equal_to_target_temperature >= 0){
+    load_and_validate_temperature_characterization_entry(eeprom_table_base_address, 
+      index_of_highest_temperature_that_is_less_than_or_equal_to_target_temperature);
+    return true;  
+  }
+
+  // if we got to here it means that the target temperature is colder than the coldest characterized value
+  // or there are no valid entries 
+  return false; 
+  
+}
+
+boolean valid_temperature_characterization_struct(baseline_voltage_t * temperature_characterization_struct_p){
+  if(isnan(temperature_characterization_struct_p->temperature_degC)){
+    return false;
+  }
+  
+  if(isnan(temperature_characterization_struct_p->slope_volts_per_degC)){
+    return false;
+  }
+  
+  if(isnan(temperature_characterization_struct_p->intercept_volts)){
+    return false;
+  }
+
+  if(temperature_characterization_struct_p->temperature_degC < -273.15){
+    return false;
+  }
+
+  if(temperature_characterization_struct_p->temperature_degC > 60.0){
+    return false;
+  }
+  
+  return true;  
+}
+
+boolean valid_temperature_characterization_entry(uint32_t eeprom_table_base_address, uint8_t index){
+  // the entry is valid only if none of the three fields are NaN
+  // read the requested table entry into RAM, note side effect is baseline_voltage_struct is loaded with the data    
+  load_temperature_characterization_entry(eeprom_table_base_address, index);
+  return valid_temperature_characterization_struct(&baseline_voltage_struct);
+}
+
+boolean valid_temperature_characterization(uint32_t eeprom_table_base_address){
+  // the table is valid only if the first entry is valid
+  if(load_and_validate_temperature_characterization_entry(eeprom_table_base_address, 0)){
+    return true;
+  }
+  return false;
+}
+
+void print_baseline_voltage_characterization_entry(uint32_t eeprom_table_base_address, uint8_t index){ 
+  
+  if(valid_temperature_characterization_entry(eeprom_table_base_address, index)){
+    Serial.print(F("        ")); 
+    Serial.print(index);
+    Serial.print(F("\t"));
+    Serial.print(baseline_voltage_struct.temperature_degC,8);
+    Serial.print(F("\t"));
+    Serial.print(baseline_voltage_struct.slope_volts_per_degC,8);
+    Serial.print(F("\t"));
+    Serial.print(baseline_voltage_struct.intercept_volts,8);
+    Serial.println();
+  }
+  
+}
+
+void print_baseline_voltage_characterization(uint32_t eeprom_table_base_address){
+  Serial.print(F("        ")); 
+  Serial.println(F("idx\ttemp [degC]\tslope [V/degC]\tintercept [V]"));
+  Serial.print(F("        ")); 
+  Serial.println(F("---------------------------------------------------------"));
+  if(!load_and_validate_temperature_characterization_entry(eeprom_table_base_address, 0)){
+    Serial.print(F("        "));   
+    Serial.println(F("No valid entries found.")); 
+  }
+  else{
+    for(uint8_t ii = 0; ii < 5; ii++){
+      if(load_and_validate_temperature_characterization_entry(eeprom_table_base_address, ii)){
+        print_baseline_voltage_characterization_entry(eeprom_table_base_address, ii);
+      }
+      else{
+        break;
+      }
+    }
+  }
+}
+
 /****** LCD SUPPORT FUNCTIONS ******/
 void safe_dtostrf(float value, signed char width, unsigned char precision, char * target_buffer, uint16_t target_buffer_length){
   char meta_format_string[16] = "%%.%df";
@@ -4027,6 +4357,21 @@ void trim_string(char * str){
   
   //Serial.print(F("rtrim: "));
   //Serial.println(str);  
+}
+
+void replace_nan_with_null(char * str){
+  if(strcmp(str, "nan") == 0){    
+    strcpy(str, "null");
+  }
+}
+
+void replace_character(char * str, char find_char, char replace_char){
+  uint16_t len = strlen(str);
+  for(uint16_t ii = 0; ii < len; ii++){
+    if(str[ii] == find_char){
+      str[ii] = replace_char;
+    }
+  }
 }
 
 // returns false if truncating the string to the field width
@@ -4569,6 +4914,7 @@ void clearTempBuffers(void){
   memset(converted_value_string, 0, 64);
   memset(compensated_value_string, 0, 64);
   memset(raw_value_string, 0, 64);
+  memset(raw_instant_value_string, 0, 64);
   memset(scratch, 0, 512);
   memset(MQTT_TOPIC_STRING, 0, 128);
 }
@@ -4698,6 +5044,7 @@ boolean publishHeartbeat(){
   clearTempBuffers();
   static uint32_t post_counter = 0;  
   uint8_t sample = pgm_read_byte(&heartbeat_waveform[heartbeat_waveform_index++]);
+  
   snprintf(scratch, 511, 
   "{"
   "\"serial-number\":\"%s\","
@@ -4710,6 +5057,8 @@ boolean publishHeartbeat(){
   if(heartbeat_waveform_index >= NUM_HEARTBEAT_WAVEFORM_SAMPLES){
      heartbeat_waveform_index = 0;
   }
+  
+  replace_character(scratch, '\'', '\"');
   
   strcat(MQTT_TOPIC_STRING, MQTT_TOPIC_PREFIX);
   strcat(MQTT_TOPIC_STRING, "heartbeat");    
@@ -4729,21 +5078,42 @@ boolean publishTemperature(){
   if(temperature_units == 'F'){
     reported_temperature = toFahrenheit(reported_temperature);
     raw_temperature = toFahrenheit(raw_temperature);
+    safe_dtostrf(toFahrenheit(instant_temperature_degc), -6, 2, raw_instant_value_string, 16);
+  }
+  else{
+    safe_dtostrf(instant_temperature_degc, -6, 2, raw_instant_value_string, 16);
   }
   safe_dtostrf(reported_temperature, -6, 2, converted_value_string, 16);
   safe_dtostrf(raw_temperature, -6, 2, raw_value_string, 16);
+  
   trim_string(converted_value_string);
   trim_string(raw_value_string);
+  trim_string(raw_instant_value_string);
+
+  replace_nan_with_null(converted_value_string);
+  replace_nan_with_null(raw_value_string);
+  replace_nan_with_null(raw_instant_value_string);
+  
   snprintf(scratch, 511,
     "{"
     "\"serial-number\":\"%s\","
     "\"converted-value\":%s,"
     "\"converted-units\":\"deg%c\","
     "\"raw-value\":%s,"
+    "\"raw-instant-value\":%s,"
     "\"raw-units\":\"deg%c\","
     "\"sensor-part-number\":\"SHT25\""
     "%s"
-    "}", mqtt_client_id, converted_value_string, temperature_units, raw_value_string, temperature_units, gps_mqtt_string);
+    "}", 
+    mqtt_client_id,  
+    converted_value_string,  
+    temperature_units,  
+    raw_value_string,  
+    raw_instant_value_string,
+    temperature_units,  
+    gps_mqtt_string);
+
+  replace_character(scratch, '\'', '\"');
     
   strcat(MQTT_TOPIC_STRING, MQTT_TOPIC_PREFIX);
   strcat(MQTT_TOPIC_STRING, "temperature");    
@@ -4759,8 +5129,16 @@ boolean publishHumidity(){
   
   safe_dtostrf(reported_humidity, -6, 2, converted_value_string, 16);
   safe_dtostrf(raw_humidity, -6, 2, raw_value_string, 16);
+  safe_dtostrf(instant_humidity_percent, -6, 2, raw_instant_value_string, 16);
+  
   trim_string(converted_value_string);
   trim_string(raw_value_string);
+  trim_string(raw_instant_value_string);
+
+  replace_nan_with_null(converted_value_string);
+  replace_nan_with_null(raw_value_string);
+  replace_nan_with_null(raw_instant_value_string);
+  
   snprintf(scratch, 511, 
     "{"
     "\"serial-number\":\"%s\","    
@@ -4770,7 +5148,14 @@ boolean publishHumidity(){
     "\"raw-units\":\"percent\","  
     "\"sensor-part-number\":\"SHT25\""
     "%s"
-    "}", mqtt_client_id, converted_value_string, raw_value_string, gps_mqtt_string);  
+    "}", 
+    mqtt_client_id, 
+    converted_value_string, 
+    raw_value_string, 
+    raw_instant_value_string, 
+    gps_mqtt_string);  
+
+  replace_character(scratch, '\'', '\"');
 
   strcat(MQTT_TOPIC_STRING, MQTT_TOPIC_PREFIX);
   strcat(MQTT_TOPIC_STRING, "humidity");    
@@ -4778,10 +5163,9 @@ boolean publishHumidity(){
 }
 
 void collectTemperature(void){
-  float raw_value = 0.0f;
   if(init_sht25_ok){
-    if(sht25.getTemperature(&raw_value)){
-      addSample(TEMPERATURE_SAMPLE_BUFFER, raw_value);       
+    if(sht25.getTemperature(&instant_temperature_degc)){
+      addSample(TEMPERATURE_SAMPLE_BUFFER, instant_temperature_degc);       
       if(sample_buffer_idx == (sample_buffer_depth - 1)){
         temperature_ready = true;
       }
@@ -4790,10 +5174,9 @@ void collectTemperature(void){
 }
 
 void collectHumidity(void){
-  float raw_value = 0.0f;
   if(init_sht25_ok){
-    if(sht25.getRelativeHumidity(&raw_value)){
-      addSample(HUMIDITY_SAMPLE_BUFFER, raw_value);       
+    if(sht25.getRelativeHumidity(&instant_humidity_percent)){
+      addSample(HUMIDITY_SAMPLE_BUFFER, instant_humidity_percent);       
       if(sample_buffer_idx == (sample_buffer_depth - 1)){
         humidity_ready = true;
       }
@@ -4872,13 +5255,11 @@ void addSample(uint8_t sample_type, float value){
   }
 }
 
-void collectSO2(void){
-  float raw_value = 0.0f;
-  
+void collectSO2(void){  
   if(init_so2_afe_ok && init_so2_adc_ok){
     selectSlot2();  
-    if(burstSampleADC(&raw_value)){      
-      addSample(SO2_SAMPLE_BUFFER, raw_value);
+    if(burstSampleADC(&instant_so2_v)){      
+      addSample(SO2_SAMPLE_BUFFER, instant_so2_v);
       if(sample_buffer_idx == (sample_buffer_depth - 1)){
         so2_ready = true;
       }
@@ -4889,12 +5270,10 @@ void collectSO2(void){
 }
 
 void collectO3(void ){  
-  float raw_value = 0.0f;
-  
   if(init_o3_afe_ok && init_o3_adc_ok){
     selectSlot1();  
-    if(burstSampleADC(&raw_value)){   
-      addSample(O3_SAMPLE_BUFFER, raw_value);      
+    if(burstSampleADC(&instant_o3_v)){   
+      addSample(O3_SAMPLE_BUFFER, instant_o3_v);      
       if(sample_buffer_idx == (sample_buffer_depth - 1)){
         o3_ready = true;
       }      
@@ -4998,11 +5377,43 @@ void so2_convert_from_volts_to_ppb(float volts, float * converted_value, float *
   if(*converted_value <= 0.0f){
     *converted_value = 0.0f; 
   }
-  
+                                   
+  if(valid_temperature_characterization(EEPROM_SO2_BASELINE_VOLTAGE_TABLE)){
+    // do the math a little differently in this case
+    // first figure out what baseline_offset_voltage_at_temperature is based on the characterization
+    // (1) find the first entry in the table where temperature_degc is >= the table temperature
+    // (2) if no such entry exists, then it is colder than the coldest characterized temperature
+    // (3) use the associated slope and intercept to determine baseline_offset_voltage_at_temperature
+    //     using the formula baseline_offset_voltage_at_temperature = slope * temperature_degc + intercept
+    if(find_and_load_temperature_characterization_entry(EEPROM_SO2_BASELINE_VOLTAGE_TABLE, temperature_degc)){
+      // great we have a useful entry in the table for this temperature, pull the slope and intercept
+      // and use them to evaluate the baseline voltage at the current temperature
+      baseline_offset_voltage_at_temperature = 
+        temperature_degc * baseline_voltage_struct.slope_volts_per_degC + baseline_voltage_struct.intercept_volts;
+    }
+    else{
+      // it's colder than the coldest characterized temperature
+      // in this special case, instead of extrapolating, we will just evaluate the entry line
+      // at coldest characterized temperature, and use that
+      load_temperature_characterization_entry(EEPROM_SO2_BASELINE_VOLTAGE_TABLE, 0);
+      baseline_offset_voltage_at_temperature = 
+        baseline_voltage_struct.temperature_degC * baseline_voltage_struct.slope_volts_per_degC + baseline_voltage_struct.intercept_volts;
+    }
+
+    
+    // then do the math with that number, if we did the characterization properly, then 
+    // volts should always be *larger* than baseline_offset_voltage_at_temperature in the presense of SO2 gas
+    *temperature_compensated_value = (volts - baseline_offset_voltage_at_temperature) * so2_slope_ppb_per_volt 
+                                     / signal_scaling_factor_at_temperature 
+                                     / signal_scaling_factor_at_altitude;     
+  }
+  else{
+    // otherwise the static data-sheet based method prevails and we do the same math as before
   *temperature_compensated_value = (volts - so2_zero_volts - baseline_offset_voltage_at_temperature) * so2_slope_ppb_per_volt 
                                    / signal_scaling_factor_at_temperature 
                                    / signal_scaling_factor_at_altitude;
-                                   
+  } 
+
   if(*temperature_compensated_value <= 0.0f){
     *temperature_compensated_value = 0.0f;
   }
@@ -5017,13 +5428,23 @@ boolean publishSO2(){
   safe_dtostrf(so2_moving_average, -8, 6, raw_value_string, 16);
   safe_dtostrf(converted_value, -4, 2, converted_value_string, 16);
   safe_dtostrf(compensated_value, -4, 2, compensated_value_string, 16); 
+  safe_dtostrf(instant_so2_v, -8, 5, raw_instant_value_string, 16);
+  
   trim_string(raw_value_string);
   trim_string(converted_value_string);
   trim_string(compensated_value_string);  
+  trim_string(raw_instant_value_string);
+  
+  replace_nan_with_null(raw_value_string);
+  replace_nan_with_null(converted_value_string);
+  replace_nan_with_null(compensated_value_string);
+  replace_nan_with_null(raw_instant_value_string);
+  
   snprintf(scratch, 511, 
     "{"
     "\"serial-number\":\"%s\","       
     "\"raw-value\":%s,"
+    "\"raw-instant-value\":%s,"
     "\"raw-units\":\"volt\","
     "\"converted-value\":%s,"
     "\"converted-units\":\"ppb\","
@@ -5033,9 +5454,12 @@ boolean publishSO2(){
     "}",
     mqtt_client_id,
     raw_value_string, 
+    raw_instant_value_string,
     converted_value_string, 
     compensated_value_string,
     gps_mqtt_string);  
+  
+  replace_character(scratch, '\'', '\"'); // replace single quotes with double quotes
   
   strcat(MQTT_TOPIC_STRING, MQTT_TOPIC_PREFIX);
   strcat(MQTT_TOPIC_STRING, "so2");    
@@ -5112,10 +5536,41 @@ void o3_convert_from_volts_to_ppb(float volts, float * converted_value, float * 
     *converted_value = 0.0f; 
   }
 
+  if(valid_temperature_characterization(EEPROM_O3_BASELINE_VOLTAGE_TABLE)){
+    // do the math a little differently in this case
+    // first figure out what baseline_offset_voltage_at_temperature is based on the characterization
+    // (1) find the first entry in the table where temperature_degc is >= the table temperature
+    // (2) if no such entry exists, then it is colder than the coldest characterized temperature
+    // (3) use the associated slope and intercept to determine baseline_offset_voltage_at_temperature
+    //     using the formula baseline_offset_voltage_at_temperature = slope * temperature_degc + intercept
+    if(find_and_load_temperature_characterization_entry(EEPROM_O3_BASELINE_VOLTAGE_TABLE, temperature_degc)){
+      // great we have a useful entry in the table for this temperature, pull the slope and intercept
+      // and use them to evaluate the baseline voltage at the current temperature
+      baseline_offset_voltage_at_temperature = 
+        temperature_degc * baseline_voltage_struct.slope_volts_per_degC + baseline_voltage_struct.intercept_volts;
+    }
+    else{
+      // it's colder than the coldest characterized temperature
+      // in this special case, instead of extrapolating, we will just evaluate the entry line
+      // at coldest characterized temperature, and use that
+      load_temperature_characterization_entry(EEPROM_O3_BASELINE_VOLTAGE_TABLE, 0);
+      baseline_offset_voltage_at_temperature = 
+        baseline_voltage_struct.temperature_degC * baseline_voltage_struct.slope_volts_per_degC + baseline_voltage_struct.intercept_volts;
+    }
 
-  *temperature_compensated_value = (o3_zero_volts - volts - baseline_offset_voltage_at_temperature) * o3_slope_ppb_per_volt 
+    
+    // then do the math with that number, if we did the characterization properly, then 
+    // volts should always be *smaller* than baseline_offset_voltage_at_temperature in the presense of O3 gas
+    *temperature_compensated_value = (baseline_offset_voltage_at_temperature - volts) * o3_slope_ppb_per_volt 
+                                     / signal_scaling_factor_at_temperature 
+                                     / signal_scaling_factor_at_altitude;     
+  }
+  else{  
+    // otherwise the static data-sheet based method prevails and we do the same math as before
+    *temperature_compensated_value = (o3_zero_volts - volts - baseline_offset_voltage_at_temperature) * o3_slope_ppb_per_volt 
                                    / signal_scaling_factor_at_temperature
-                                   / signal_scaling_factor_at_altitude;
+                                   / signal_scaling_factor_at_altitude;                                    
+  }    
                                    
   if(*temperature_compensated_value <= 0.0f){
     *temperature_compensated_value = 0.0f;
@@ -5131,13 +5586,23 @@ boolean publishO3(){
   safe_dtostrf(o3_moving_average, -8, 6, raw_value_string, 16);
   safe_dtostrf(converted_value, -4, 2, converted_value_string, 16);
   safe_dtostrf(compensated_value, -4, 2, compensated_value_string, 16);    
+  safe_dtostrf(instant_o3_v, -8, 5, raw_instant_value_string, 16);
+  
   trim_string(raw_value_string);
   trim_string(converted_value_string);
   trim_string(compensated_value_string);    
+  trim_string(raw_instant_value_string);    
+
+  replace_nan_with_null(raw_value_string);
+  replace_nan_with_null(converted_value_string);
+  replace_nan_with_null(compensated_value_string);
+  replace_nan_with_null(raw_instant_value_string);
+  
   snprintf(scratch, 511, 
     "{"
     "\"serial-number\":\"%s\","      
     "\"raw-value\":%s,"
+    "\"raw-instant-value\":%s,"
     "\"raw-units\":\"volt\","
     "\"converted-value\":%s,"
     "\"converted-units\":\"ppb\","
@@ -5147,9 +5612,12 @@ boolean publishO3(){
     "}",
     mqtt_client_id,
     raw_value_string, 
+    raw_instant_value_string,
     converted_value_string, 
     compensated_value_string,
     gps_mqtt_string);  
+
+  replace_character(scratch, '\'', '\"'); // replace single quotes with double quotes
 
   strcat(MQTT_TOPIC_STRING, MQTT_TOPIC_PREFIX);
   strcat(MQTT_TOPIC_STRING, "o3");    

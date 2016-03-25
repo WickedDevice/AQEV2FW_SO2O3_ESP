@@ -5202,6 +5202,7 @@ boolean publishHumidity(){
     "\"converted-value\":%s,"
     "\"converted-units\":\"percent\","
     "\"raw-value\":%s,"
+    "\"raw-instant-value\":%s,"
     "\"raw-units\":\"percent\","  
     "\"sensor-part-number\":\"SHT25\""
     "%s"

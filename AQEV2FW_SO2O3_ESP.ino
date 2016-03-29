@@ -339,8 +339,8 @@ const char cmd_string_sampling[] PROGMEM    = "sampling   ";
 const char cmd_string_altitude[] PROGMEM    = "altitude   ";
 const char cmd_string_ntpsrv[] PROGMEM      = "ntpsrv     ";
 const char cmd_string_tz_off[] PROGMEM      = "tz_off     ";
-const char cmd_string_so2_blv[] PROGMEM     = "no2_blv    ";
-const char cmd_string_o3_blv[] PROGMEM      = "co_blv     ";
+const char cmd_string_so2_blv[] PROGMEM     = "so2_blv    ";
+const char cmd_string_o3_blv[] PROGMEM      = "o3_blv     ";
 const char cmd_string_null[] PROGMEM        = "";
 
 PGM_P const commands[] PROGMEM = {

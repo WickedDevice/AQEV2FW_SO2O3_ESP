@@ -5163,6 +5163,8 @@ boolean mqttPublish(char * topic, char *str){
     Serial.println(F("Failed."));
     response_status = false;
   }
+
+  mqtt_client.loop();  
   
   return response_status;
 }

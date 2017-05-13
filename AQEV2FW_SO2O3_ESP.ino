@@ -7020,7 +7020,12 @@ void doSoftApModeConfigBehavior(void){
             if(got_opening_brace){
               if(c == '}'){
                 got_closing_brace = true;
-                scratch[scratch_idx++] = c;
+                if(scratch_idx < SCRATCH_BUFFER_SIZE - 1){
+                  scratch[scratch_idx++] = c;
+                }
+                else{
+                  Serial.println("Warning: scratch buffer out of memory");
+                }
                 break;
               }
               else{
@@ -7034,7 +7039,12 @@ void doSoftApModeConfigBehavior(void){
             }
             else if(c == '{'){
               got_opening_brace = true;
-              scratch[scratch_idx++] = c;
+              if(scratch_idx < SCRATCH_BUFFER_SIZE - 1){
+                scratch[scratch_idx++] = c;
+              }
+              else{
+                Serial.println("Warning: scratch buffer out of memory");
+              }
             }
           }
 
@@ -7235,11 +7245,11 @@ boolean parseConfigurationMessageBody(char * body){
       strncpy(value, body + json_tokens[ii+1].start, valuelen);
     }
 
-     Serial.print(F("Info: JSON token: "));
+     Serial.print(F("Info: JSON token: \""));
      Serial.print(key);
-     Serial.print(" => ");
+     Serial.print("\" => \"");
      Serial.print(value);
-     Serial.println();
+     Serial.println("\"");
 
     // handlers for valid JSON keys
     if(strcmp(key, "ssid") == 0){

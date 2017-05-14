@@ -5070,7 +5070,6 @@ boolean mqttReconnect(void){
        connect_status = mqtt_client.connect(mqtt_client_id);
      }
 
-     clearLCD();         
      if (connect_status) {
        Serial.println(F("OK."));
        return true;
@@ -5776,7 +5775,8 @@ void loop_wifi_mqtt_mode(void){
     if(connectedToNetwork()){
       num_mqtt_intervals_without_wifi = 0;
       
-      if(mqttReconnect()){         
+      if(mqttReconnect()){     
+        clearLCD();    
         updateLCD("TEMP ", 0, 0, 5, false);
         updateLCD("RH ", 10, 0, 3, false);         
         updateLCD("SO2 ", 0, 1, 4, false);

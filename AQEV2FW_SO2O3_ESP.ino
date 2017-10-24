@@ -2387,6 +2387,13 @@ void print_eeprom_value(char * arg) {
     print_eeprom_float((const float *) EEPROM_SO2_CAL_SLOPE);
     print_label_with_star_if_not_backed_up("SO2 Offset [V]: ", BACKUP_STATUS_SO2_CALIBRATION_BIT);
     print_eeprom_float((const float *) EEPROM_SO2_CAL_OFFSET);
+    Serial.print(F("    ")); Serial.print(F("SO2 Report Negatives value as zero: "));
+    if(eeprom_read_byte((const uint8_t *) EEPROM_SO2_ZERO_NEGATIVE_RESULTS)){
+      Serial.println(F("yes"));
+    }
+    else{
+      Serial.println(F("no"));
+    }    
     Serial.print(F("    ")); Serial.println(F("SO2 Baseline Voltage Characterization:"));
     print_baseline_voltage_characterization(EEPROM_SO2_BASELINE_VOLTAGE_TABLE);
 
@@ -2396,6 +2403,13 @@ void print_eeprom_value(char * arg) {
     print_eeprom_float((const float *) EEPROM_O3_CAL_SLOPE);
     print_label_with_star_if_not_backed_up("O3 Offset [V]: ", BACKUP_STATUS_O3_CALIBRATION_BIT);
     print_eeprom_float((const float *) EEPROM_O3_CAL_OFFSET);
+    Serial.print(F("    ")); Serial.print(F("O3 Report Negatives value as zero: "));
+    if(eeprom_read_byte((const uint8_t *) EEPROM_O3_ZERO_NEGATIVE_RESULTS)){
+      Serial.println(F("yes"));
+    }
+    else{
+      Serial.println(F("no"));
+    }    
     Serial.print(F("    ")); Serial.println(F("O3 Baseline Voltage Characterization:"));
     print_baseline_voltage_characterization(EEPROM_O3_BASELINE_VOLTAGE_TABLE);
     

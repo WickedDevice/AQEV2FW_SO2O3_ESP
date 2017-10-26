@@ -6033,11 +6033,17 @@ void delayForWatchdog(void){
 }
 
 void watchdogForceReset(void){
+  watchdogForceReset(true);
+}
+
+void watchdogForceReset(boolean changeLCD){
   Serial.println(F("Info: Attempting Watchdog Forced Restart."));
-  setLCD_P(PSTR("   ATTEMPTING   "
-                "  FORCED RESET  "));
-  backlightOn();
-  ERROR_MESSAGE_DELAY();
+  if(changeLCD){
+    setLCD_P(PSTR("   ATTEMPTING   "
+                  "  FORCED RESET  "));
+    backlightOn();
+    ERROR_MESSAGE_DELAY();
+  }
   
   tinywdt.force_reset(); 
   Serial.println(F("Error: Watchdog Force Restart failed. Manual reset is required."));
@@ -6719,7 +6725,7 @@ void checkForFirmwareUpdates(){
                         "WAIT ONE MINUTE "));          
           lcdSmiley(15, 1);
           SUCCESS_MESSAGE_DELAY();
-          watchdogForceReset();        
+          watchdogForceReset(false);        
         }
         else{
           Serial.println(F("Error: Firmware Update Failed. Try again later by resetting."));
